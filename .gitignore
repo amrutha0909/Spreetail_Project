@@ -9,6 +9,7 @@ build/
 .next
 .nuxt
 out/
+backend/public/
 
 # IDEs and editors
 .idea/
