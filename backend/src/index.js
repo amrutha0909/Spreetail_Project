@@ -7,6 +7,7 @@ const groupRoutes = require('./routes/groups');
 const expenseRoutes = require('./routes/expenses');
 const balanceRoutes = require('./routes/balances');
 const settlementRoutes = require('./routes/settlements');
+const importRoutes = require('./routes/import');
 const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
@@ -28,6 +29,7 @@ app.use('/api/groups', groupRoutes);
 app.use('/api/groups/:groupId/expenses', expenseRoutes);
 app.use('/api/groups/:groupId/balances', balanceRoutes);
 app.use('/api/groups/:groupId/settlements', settlementRoutes);
+app.use('/api/import', importRoutes);
 
 // Root test endpoint
 app.get('/health', (req, res) => {
