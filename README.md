@@ -76,7 +76,76 @@ We run the entire stack from the project root using the scripts defined in [pack
 
 ---
 
-## 4. Render Deployment Checklist
+## 4. Docker & Containerized Execution
+
+This project includes a [Dockerfile](file:///d:/Spreetail_Project/Dockerfile) in the root directory configured for production-ready, single-container deployments (hosting both the Express REST API and the compiled React static assets).
+
+### 4.1 Building the Docker Image
+
+Build the container image from the root of the project:
+```bash
+docker build -t shared-expenses-app .
+```
+
+### 4.2 Running the Container Locally
+
+Run the container locally by forwarding port `3000` and passing the required environment variables:
+```bash
+docker run -d -p 3000:3000 \
+  -e DATABASE_URL="postgresql://username:password@host.docker.internal:5432/flat_expenses?sslmode=disable" \
+  -e JWT_SECRET="your_secret_access_key" \
+  -e JWT_REFRESH_SECRET="your_secret_refresh_key" \
+  --name shared-expenses \
+  shared-expenses-app
+```
+> [!NOTE]
+> If your PostgreSQL database runs on the host OS (and not inside another Docker container), use `host.docker.internal` in the connection string to allow the container to communicate with the host.
+
+---
+
+## 5. EC2 Deployment Checklist (Docker)
+
+To deploy the containerized application on an AWS EC2 instance:
+
+### 5.1 Prepare the EC2 Instance
+1. Launch an EC2 Instance (e.g., Ubuntu Server LTS, `t2.micro` or higher).
+2. Configure the **Security Group** to allow inbound traffic on:
+   - **Port 22** (SSH) from your IP.
+   - **Port 3000** (or port 80/443 if you configure a reverse proxy like Nginx) from anywhere.
+
+### 5.2 Install Docker on EC2
+Connect to your instance via SSH and run:
+```bash
+sudo apt-get update -y
+sudo apt-get install docker.io -y
+sudo systemctl start docker
+sudo systemctl enable docker
+# Optional: Add user to the docker group so you don't need 'sudo'
+sudo usermod -aG docker $USER
+```
+*(Log out and back in to apply the group changes.)*
+
+### 5.3 Deploy and Run
+1. Clone the repository on the instance, or pull your pre-built image from a registry (e.g., Docker Hub / ECR).
+2. If cloning the code, build the image locally on the instance:
+   ```bash
+   docker build -t shared-expenses-app .
+   ```
+3. Run the container, ensuring to restart automatically and point to your production database:
+   ```bash
+   docker run -d \
+     -p 3000:3000 \
+     --restart always \
+     -e DATABASE_URL="your-production-db-connection-string" \
+     -e JWT_SECRET="your-secure-jwt-secret" \
+     -e JWT_REFRESH_SECRET="your-secure-refresh-jwt-secret" \
+     --name shared-expenses-prod \
+     shared-expenses-app
+   ```
+
+---
+
+## 6. Render Deployment Checklist
 
 We deploy this repository as a single Node.js Web Service on Render.
 
