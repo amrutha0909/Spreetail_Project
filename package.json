@@ -1,0 +1,11 @@
+{
+  "name": "spreetail-project",
+  "version": "1.0.0",
+  "description": "Shared Expenses App serving both React frontend and Express API",
+  "scripts": {
+    "build": "cd frontend && npm install && npm run build",
+    "start": "cd backend && node src/index.js",
+    "dev:backend": "cd backend && nodemon src/index.js",
+    "dev:frontend": "cd frontend && npm run dev"
+  }
+}
