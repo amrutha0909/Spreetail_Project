@@ -2,6 +2,7 @@ const Papa = require('papaparse');
 const prisma = require('../prisma');
 const { parseDate } = require('../utils/dateParser');
 const { computeSplits, round2 } = require('../utils/splitCalculator');
+const { getUSDRate } = require('./currencyService');
 
 /**
  * Import Service
@@ -79,7 +80,7 @@ function fuzzyMatchUser(name, knownUsers) {
  * Scans parsed rows, returning all anomalies.
  * Every row gets at least one entry in the database.
  */
-function runAnomalyDetection(rows, knownUsers) {
+async function runAnomalyDetection(rows, knownUsers) {
   const anomalies = [];
   const exactDuplicatesMap = {};
   const diffAmountMap = {};
@@ -179,17 +180,21 @@ function runAnomalyDetection(rows, knownUsers) {
       rowAnomaliesCount++;
     }
 
+    // Parse date for checks 9 and 6 (historical rate)
+    const parsedDate = parseDate(rawDate);
+
     // --- Check 6: FOREIGN CURRENCY (USD) ---
     const isUSD = rawCurrency.toUpperCase().trim() === 'USD';
     if (isUSD) {
+      const apiRate = await getUSDRate(parsedDate || new Date('2026-03-14'));
       anomalies.push({
         rowNumber,
         rowRaw,
         anomalyType: 'FOREIGN_CURRENCY',
         severity: 'WARNING',
-        description: `Foreign currency detected (USD). Converted using fallback exchange rate: 1 USD = ₹83.50.`,
+        description: `Foreign currency detected (USD). Converted using exchange rate: 1 USD = ₹${apiRate.toFixed(2)}.`,
         defaultAction: 'ACCEPT',
-        defaultData: { currency: 'USD', exchangeRate: 83.50 }
+        defaultData: { currency: 'USD', exchangeRate: apiRate }
       });
       rowAnomaliesCount++;
     }
@@ -252,7 +257,6 @@ function runAnomalyDetection(rows, knownUsers) {
     }
 
     // --- Check 9: AMBIGUOUS DATE ---
-    const parsedDate = parseDate(rawDate);
     if (!parsedDate) {
       anomalies.push({
         rowNumber,
@@ -292,7 +296,7 @@ function runAnomalyDetection(rows, knownUsers) {
         rowRaw,
         anomalyType: 'SETTLEMENT_AS_EXPENSE',
         severity: 'ERROR',
-        description: `"${rawDesc}" looks like a settlement back-payment rather than a shared group expense.`,
+        description: `"${rawDesc}" looks like a settlement payment rather than a shared group expense.`,
         defaultAction: 'MODIFY',
         defaultData: { isSettlement: true }
       });
@@ -441,7 +445,7 @@ function runAnomalyDetection(rows, knownUsers) {
       }
     }
 
-    // --- STORE GOOD ROWS AS INFO ANOMALIES (so they are saved in DB for Phase 2) ---
+    // --- STORE GOOD ROWS AS INFO ANOMALIES ---
     if (rowAnomaliesCount === 0) {
       anomalies.push({
         rowNumber,
@@ -479,7 +483,7 @@ async function parseAndScanCSV(filename, csvData) {
     }
   });
 
-  const detectedAnomalies = runAnomalyDetection(rows, knownUsers);
+  const detectedAnomalies = await runAnomalyDetection(rows, knownUsers);
 
   const run = await prisma.importRun.create({
     data: {
@@ -505,7 +509,6 @@ async function parseAndScanCSV(filename, csvData) {
       }))
     });
 
-    // Mark as REVIEW if we have warning or error anomalies
     const hasProblems = detectedAnomalies.some(a => a.anomalyType !== 'NONE');
     await prisma.importRun.update({
       where: { id: run.id },
@@ -523,15 +526,6 @@ async function parseAndScanCSV(filename, csvData) {
 
 /**
  * executeImport
- * 
- * Purpose:
- * Processes each row in the run based on the user's resolution decisions,
- * inserts them as Expense/Split/Settlement objects, and updates run state.
- * 
- * Requirements:
- * - Atomic write.
- * - Create guests.
- * - Handle splits and currency conversions.
  */
 async function executeImport(runId, groupId) {
   const run = await prisma.importRun.findUnique({
@@ -542,18 +536,15 @@ async function executeImport(runId, groupId) {
   if (!run) throw new Error('Import run not found');
   if (run.status === 'COMPLETE') throw new Error('Import run already finalized');
 
-  // Verify all anomalies have a resolution (non-PENDING)
   const unresolved = run.anomalies.find(a => a.resolution === 'PENDING');
   if (unresolved) {
     throw new Error(`Cannot execute import. Anomaly at Row ${unresolved.rowNumber} is unresolved.`);
   }
 
-  // Get active users in system
   const knownUsers = await prisma.user.findMany({
     include: { groupMemberships: true }
   });
 
-  // Group anomalies by rowNumber (a single row could have multiple logs)
   const anomaliesByRow = {};
   run.anomalies.forEach(a => {
     if (!anomaliesByRow[a.rowNumber]) anomaliesByRow[a.rowNumber] = [];
@@ -565,15 +556,12 @@ async function executeImport(runId, groupId) {
   let skippedRowsCount = 0;
   const resolutionsLog = [];
 
-  // Execute import inside an atomic transaction
   await prisma.$transaction(async (tx) => {
-    // Process rows chronologically (row number ascending)
     const sortedRowNumbers = Object.keys(anomaliesByRow).map(Number).sort((a, b) => a - b);
 
     for (const rowNumber of sortedRowNumbers) {
       const rowAnomalies = anomaliesByRow[rowNumber];
       
-      // Determine final resolution actions
       const isSkipped = rowAnomalies.some(a => a.resolution === 'SKIPPED');
       if (isSkipped) {
         skippedRowsCount++;
@@ -581,11 +569,9 @@ async function executeImport(runId, groupId) {
         continue;
       }
 
-      // Parse the raw CSV data from the first anomaly record of this row
       const firstAnomaly = rowAnomalies[0];
       const rowData = JSON.parse(firstAnomaly.rowRaw);
 
-      // Merge decisions across anomalies for this row
       let resolvedAmount = null;
       let resolvedCurrency = null;
       let resolvedDateStr = null;
@@ -595,7 +581,7 @@ async function executeImport(runId, groupId) {
       let isSettlement = false;
       let customExchangeRate = null;
       let forceNormalizePercentage = false;
-      let guestsToCreate = []; // List of guest names to register
+      let guestsToCreate = [];
 
       rowAnomalies.forEach(a => {
         const choiceData = a.resolvedData ? JSON.parse(a.resolvedData) : {};
@@ -612,7 +598,6 @@ async function executeImport(runId, groupId) {
         }
       });
 
-      // Default values if no overrides
       const rawDateStr = rowData.date || '';
       const rawDesc = rowData.description || '';
       const rawPayer = rowData.paid_by || '';
@@ -623,13 +608,11 @@ async function executeImport(runId, groupId) {
       const rawSplitDetails = rowData.split_details || '';
       const rawNotes = rowData.notes || '';
 
-      // Fallback variables
       const finalAmount = resolvedAmount !== null ? resolvedAmount : Number(rawAmountStr.replace(/,/g, ''));
       const finalCurrency = resolvedCurrency !== null ? resolvedCurrency : (rawCurrency || 'INR');
       const finalDate = resolvedDateStr ? new Date(resolvedDateStr) : (parseDate(rawDateStr) || new Date('2026-03-14'));
       const finalNotes = rawNotes;
 
-      // Handle payer resolving
       let finalPayerId = resolvedPayerId;
       if (!finalPayerId) {
         const payerMatch = fuzzyMatchUser(rawPayer, knownUsers);
@@ -637,18 +620,14 @@ async function executeImport(runId, groupId) {
           finalPayerId = payerMatch.user.id;
           resolvedPayerName = payerMatch.user.name;
         } else {
-          // If payer remains null (e.g. missing payer error is unresolved), throw error
           throw new Error(`Row ${rowNumber} payer cannot be determined`);
         }
       }
 
-      // 1. Create any guests requested (Dev's friend Kabir)
-      const guestIdsMap = {}; // name -> userId
+      const guestIdsMap = {};
       for (const guestName of guestsToCreate) {
-        // Check if guest user already exists in DB
         let guest = await tx.user.findFirst({ where: { name: guestName } });
         if (!guest) {
-          // Create new user account with placeholder details
           guest = await tx.user.create({
             data: {
               email: `${guestName.toLowerCase().replace(/\s+/g, '_')}_guest_${Date.now()}@example.com`,
@@ -657,7 +636,6 @@ async function executeImport(runId, groupId) {
             }
           });
         }
-        // Check if they are already in the group memberships
         const membership = await tx.groupMembership.findFirst({
           where: { groupId, userId: guest.id }
         });
@@ -666,24 +644,21 @@ async function executeImport(runId, groupId) {
             data: {
               groupId,
               userId: guest.id,
-              joinedAt: finalDate // Join date defaults to the date of this expense
+              joinedAt: finalDate
             }
           });
         }
         guestIdsMap[guestName] = guest.id;
       }
 
-      // Convert USD currency
       let finalExchangeRate = null;
       let finalAmountInr = finalAmount;
       if (finalCurrency === 'USD') {
-        finalExchangeRate = customExchangeRate || 83.5;
+        finalExchangeRate = customExchangeRate || (await getUSDRate(finalDate));
         finalAmountInr = round2(finalAmount * finalExchangeRate);
       }
 
       if (isSettlement) {
-        // Import as a Settlement
-        // Extract recipient from split_with (single name)
         const payeeNames = rawSplitWith.split(';').filter(n => n.trim());
         let finalPayeeId = null;
         if (payeeNames.length > 0) {
@@ -697,7 +672,6 @@ async function executeImport(runId, groupId) {
         }
 
         if (!finalPayeeId) {
-          // Fallback: if payee cannot be resolved, assign a default member
           throw new Error(`Row ${rowNumber} settlement payee cannot be determined`);
         }
 
@@ -717,10 +691,7 @@ async function executeImport(runId, groupId) {
         importedSettlementsCount++;
         resolutionsLog.push({ rowNumber, description: `Imported as settlement from User ${finalPayerId} to User ${finalPayeeId}`, action: 'SETTLEMENT' });
       } else {
-        // Import as Expense
         const finalSplitType = resolvedSplitType || (rawSplitType || 'EQUAL');
-        
-        // Build participant IDs list
         const splitWithNames = rawSplitWith.split(';').filter(n => n.trim());
         const participantIds = [];
 
@@ -733,24 +704,19 @@ async function executeImport(runId, groupId) {
           }
         });
 
-        // Ensure payer is also included in splits if equal split by default,
-        // or check if split_with is explicitly defined
         if (participantIds.length === 0) {
-          // If empty, default to all active users in group
           const activeMemberships = await tx.groupMembership.findMany({
             where: { groupId }
           });
           activeMemberships.forEach(m => participantIds.push(m.userId));
         }
 
-        // Parse split details percentages / shares / unequal amounts
         let calculatedSplitDetails = [];
 
         if (finalSplitType !== 'EQUAL' && rawSplitDetails) {
-          // Aisha 30%; Rohan 30% or Aisha 1; Rohan 2
           calculatedSplitDetails = rawSplitDetails.split(';').map(item => {
             const parts = item.trim().split(/\s+/);
-            const valStr = parts[parts.length - 1]; // e.g. "30%" or "1"
+            const valStr = parts[parts.length - 1];
             const name = parts.slice(0, parts.length - 1).join(' ');
 
             const match = fuzzyMatchUser(name, knownUsers);
@@ -760,7 +726,6 @@ async function executeImport(runId, groupId) {
             return { userId, value: val };
           }).filter(d => d.userId !== null);
 
-          // Force percentage normalization if flagged
           if (forceNormalizePercentage && finalSplitType === 'PERCENTAGE') {
             const sumPct = calculatedSplitDetails.reduce((s, d) => s + d.value, 0);
             if (sumPct > 0) {
@@ -772,19 +737,15 @@ async function executeImport(runId, groupId) {
           }
         }
 
-        // Handle Member after departure removal
-        // If resolution was to remove a user from split, filter them
         const departureAnomaly = rowAnomalies.find(a => a.anomalyType === 'MEMBER_AFTER_DEPARTURE' && a.resolution === 'MODIFY');
         if (departureAnomaly) {
           const removeData = JSON.parse(departureAnomaly.resolvedData || '{}');
           if (removeData.removeUserId) {
             const rId = Number(removeData.removeUserId);
-            // Remove from participants and splitDetails
-            const nextParticipants = participantIds.filter(id => id !== rId);
+            participantIds.splice(participantIds.indexOf(rId), 1);
             if (calculatedSplitDetails.length > 0) {
               calculatedSplitDetails = calculatedSplitDetails.filter(d => d.userId !== rId);
             }
-            // If percentage sum was off now because of removal, force recalculating/redistributing
             if (finalSplitType === 'PERCENTAGE') {
               const sumPct = calculatedSplitDetails.reduce((s, d) => s + d.value, 0);
               if (sumPct > 0) {
@@ -797,7 +758,6 @@ async function executeImport(runId, groupId) {
           }
         }
 
-        // Map participant IDs for computeSplits parameters
         const splitInputs = participantIds.map(userId => {
           const detail = calculatedSplitDetails.find(d => d.userId === userId);
           return {
@@ -806,7 +766,6 @@ async function executeImport(runId, groupId) {
           };
         });
 
-        // Compute split details using utility
         const computedSplits = computeSplits(
           finalAmountInr,
           finalSplitType,
@@ -814,7 +773,6 @@ async function executeImport(runId, groupId) {
           finalSplitType === 'EQUAL' ? undefined : splitInputs
         );
 
-        // Save Expense
         const exp = await tx.expense.create({
           data: {
             groupId,
@@ -831,7 +789,6 @@ async function executeImport(runId, groupId) {
           }
         });
 
-        // Save splits
         await tx.expenseSplit.createMany({
           data: computedSplits.map(s => ({
             expenseId: exp.id,
@@ -846,7 +803,6 @@ async function executeImport(runId, groupId) {
       }
     }
 
-    // Update import run status to COMPLETE
     await tx.importRun.update({
       where: { id: runId },
       data: {
