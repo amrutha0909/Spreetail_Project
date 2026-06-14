@@ -286,27 +286,32 @@ router.patch('/:id/members/:userId', async (req, res, next) => {
   try {
     const groupId = parseInt(req.params.id);
     const userId = parseInt(req.params.userId);
-    const { leftAt } = req.body;
+    const { leftAt, joinedAt } = req.body;
 
     if (isNaN(groupId) || isNaN(userId)) {
       return res.status(400).json({ error: 'Invalid group or user ID' });
     }
 
-    // Find the membership. There could be multiple entries if join/leave history is stored,
-    // but schema has unique constraint @@unique([groupId, userId, joinedAt]). We find the active one (leftAt is null).
+    // Find the membership.
     const membership = await prisma.groupMembership.findFirst({
-      where: { groupId, userId, leftAt: null }
+      where: { groupId, userId }
     });
 
     if (!membership) {
-      return res.status(404).json({ error: 'Active group membership not found' });
+      return res.status(404).json({ error: 'Group membership not found' });
+    }
+
+    const data = {};
+    if (leftAt !== undefined) {
+      data.leftAt = leftAt ? new Date(leftAt) : null;
+    }
+    if (joinedAt !== undefined) {
+      data.joinedAt = new Date(joinedAt);
     }
 
     const updated = await prisma.groupMembership.update({
       where: { id: membership.id },
-      data: {
-        leftAt: leftAt ? new Date(leftAt) : new Date()
-      }
+      data
     });
 
     res.json(updated);

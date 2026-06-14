@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import api from '../api/axios';
-import { Users, Plus, ArrowLeft, Wallet, Receipt, Calendar, UserMinus, UserPlus, Info } from 'lucide-react';
+import { Users, Plus, ArrowLeft, Wallet, Receipt, Calendar, UserMinus, UserPlus, Info, Edit } from 'lucide-react';
 import ExpenseForm from '../components/ExpenseForm';
 
 /**
@@ -41,6 +41,12 @@ export default function GroupDetail() {
 
   // Controls displaying the Add Expense modal
   const [showExpenseModal, setShowExpenseModal] = useState(false);
+
+  // State variables for editing a member's join date
+  const [showEditMemberModal, setShowEditMemberModal] = useState(false);
+  const [selectedEditMember, setSelectedEditMember] = useState(null);
+  const [memberEditJoinDate, setMemberEditJoinDate] = useState('');
+  const [editSubmitting, setEditSubmitting] = useState(false);
 
   /**
    * fetchData
@@ -141,6 +147,45 @@ export default function GroupDetail() {
       setError(err.response?.data?.error || 'Failed to mark member as departed');
     } finally {
       setRemoveSubmitting(false);
+    }
+  };
+
+  /**
+   * handleOpenEditModal
+   * 
+   * Purpose:
+   * Prepares and opens the edit join date modal for a selected member.
+   */
+  const handleOpenEditModal = (member) => {
+    setSelectedEditMember(member);
+    const formattedDate = new Date(member.joinedAt).toISOString().split('T')[0];
+    setMemberEditJoinDate(formattedDate);
+    setShowEditMemberModal(true);
+  };
+
+  /**
+   * handleEditMember
+   * 
+   * Purpose:
+   * Updates the member's joinedAt date.
+   */
+  const handleEditMember = async (e) => {
+    e.preventDefault();
+    if (!selectedEditMember) return;
+    setEditSubmitting(true);
+    setError('');
+
+    try {
+      await api.patch(`/api/groups/${id}/members/${selectedEditMember.id}`, {
+        joinedAt: new Date(memberEditJoinDate).toISOString()
+      });
+      setSelectedEditMember(null);
+      setShowEditMemberModal(false);
+      await fetchData(); // Refresh details
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to update entry date');
+    } finally {
+      setEditSubmitting(false);
     }
   };
 
@@ -349,16 +394,27 @@ export default function GroupDetail() {
                     )}
                   </div>
 
-                  {/* Button to log departure date for active members */}
-                  {!member.leftAt && (
+                  <div className="flex items-center space-x-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {/* Button to edit entry/join date */}
                     <button
-                      onClick={() => handleOpenRemoveModal(member)}
-                      className="p-1 hover:bg-rose-500/10 rounded-lg text-slate-500 hover:text-rose-400 border border-transparent hover:border-rose-500/30 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
-                      title="Set Departure Date"
+                      onClick={() => handleOpenEditModal(member)}
+                      className="p-1 hover:bg-indigo-500/10 rounded-lg text-slate-500 hover:text-indigo-400 border border-transparent hover:border-indigo-500/30 transition-colors cursor-pointer"
+                      title="Edit Entry Date"
                     >
-                      <UserMinus className="h-4.5 w-4.5" />
+                      <Edit className="h-4 w-4" />
                     </button>
-                  )}
+
+                    {/* Button to log departure date for active members */}
+                    {!member.leftAt && (
+                      <button
+                        onClick={() => handleOpenRemoveModal(member)}
+                        className="p-1 hover:bg-rose-500/10 rounded-lg text-slate-500 hover:text-rose-400 border border-transparent hover:border-rose-500/30 transition-colors cursor-pointer"
+                        title="Set Departure Date"
+                      >
+                        <UserMinus className="h-4.5 w-4.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -472,6 +528,57 @@ export default function GroupDetail() {
                     <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
                   ) : (
                     <span>Confirm Departure</span>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal popup to edit member entry/join date */}
+      {showEditMemberModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="glass-panel w-full max-w-md p-6 bg-slate-900 animate-in fade-in zoom-in-95 duration-150">
+            <h2 className="text-xl font-bold text-slate-200 mb-2 flex items-center space-x-2">
+              <Edit className="h-5 w-5 text-indigo-400" />
+              <span>Edit Entry Date</span>
+            </h2>
+            <p className="text-slate-400 text-sm mb-6">
+              Manually update the entry join date for <strong className="text-slate-200">{selectedEditMember?.name}</strong>.
+            </p>
+            <form onSubmit={handleEditMember} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1.5" htmlFor="memberEditJoinDate">
+                  Joining Effective Date
+                </label>
+                <input
+                  id="memberEditJoinDate"
+                  type="date"
+                  value={memberEditJoinDate}
+                  onChange={(e) => setMemberEditJoinDate(e.target.value)}
+                  className="w-full px-4 py-2 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
+                  required
+                />
+              </div>
+
+              <div className="flex items-center justify-end space-x-3 pt-6">
+                <button
+                  type="button"
+                  onClick={() => setShowEditMemberModal(false)}
+                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-sm font-medium transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editSubmitting}
+                  className="gradient-btn text-sm flex items-center justify-center space-x-2 cursor-pointer"
+                >
+                  {editSubmitting ? (
+                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  ) : (
+                    <span>Save Changes</span>
                   )}
                 </button>
               </div>
