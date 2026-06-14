@@ -13,12 +13,26 @@ const errorHandler = require('./middleware/errorHandler');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`[Request] ${req.method} ${req.url}`);
+  next();
+});
+
 // Body parsing and cookies
 app.use(express.json());
 app.use(cookieParser());
 
 // Serve static frontend
 app.use(express.static(path.join(__dirname, '../public')));
+
+// Rewrite double API prefix (/api/api -> /api)
+app.use((req, res, next) => {
+  if (req.url.startsWith('/api/api/')) {
+    req.url = req.url.replace('/api/api/', '/api/');
+  }
+  next();
+});
 
 // Route mounts
 app.use('/api/auth', authRoutes);
@@ -34,9 +48,11 @@ app.get('/health', (req, res) => {
 });
 
 // All non-API routes serve index.html (React Router handles them)
-app.get('/*splat', (req, res) => {
+app.get('/*splat', (req, res, next) => {
   if (!req.path.startsWith('/api')) {
     res.sendFile(path.join(__dirname, '../public', 'index.html'));
+  } else {
+    res.status(404).json({ error: 'Not Found' });
   }
 });
 
