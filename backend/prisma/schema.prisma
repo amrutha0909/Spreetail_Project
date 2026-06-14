@@ -1,0 +1,153 @@
+// schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            Int      @id @default(autoincrement())
+  email         String   @unique
+  name          String
+  passwordHash  String
+  createdAt     DateTime @default(now())
+
+  groupMemberships  GroupMembership[]
+  expensesPaid      Expense[]         @relation("PaidBy")
+  splits            ExpenseSplit[]
+  sentSettlements   Settlement[]      @relation("Payer")
+  receivedSettlements Settlement[]    @relation("Payee")
+}
+
+model Group {
+  id          Int      @id @default(autoincrement())
+  name        String
+  description String?
+  currency    String   @default("INR")
+  createdAt   DateTime @default(now())
+
+  memberships GroupMembership[]
+  expenses    Expense[]
+  settlements Settlement[]
+}
+
+model GroupMembership {
+  id       Int       @id @default(autoincrement())
+  groupId  Int
+  userId   Int
+  joinedAt DateTime
+  leftAt   DateTime?            // NULL means currently active
+
+  group    Group @relation(fields: [groupId], references: [id])
+  user     User  @relation(fields: [userId], references: [id])
+
+  @@unique([groupId, userId, joinedAt])
+}
+
+model Expense {
+  id          Int      @id @default(autoincrement())
+  groupId     Int
+  description String
+  amount      Decimal  @db.Decimal(12, 4)   // 4 decimal places to handle edge cases
+  currency    String   @default("INR")
+  amountInr   Decimal  @db.Decimal(12, 2)   // converted to INR at import time
+  exchangeRate Decimal? @db.Decimal(10, 6)  // rate used for conversion
+  paidById    Int
+  splitType   SplitType
+  date        DateTime
+  notes       String?
+  isDeleted   Boolean  @default(false)       // soft delete
+  importRunId Int?
+
+  group       Group          @relation(fields: [groupId], references: [id])
+  paidBy      User           @relation("PaidBy", fields: [paidById], references: [id])
+  splits      ExpenseSplit[]
+  importRun   ImportRun?     @relation(fields: [importRunId], references: [id])
+}
+
+enum SplitType {
+  EQUAL
+  PERCENTAGE
+  SHARE
+  UNEQUAL
+}
+
+model ExpenseSplit {
+  id         Int     @id @default(autoincrement())
+  expenseId  Int
+  userId     Int
+  share      Decimal @db.Decimal(12, 4)   // raw share/percentage/exact amount depending on splitType
+  amountOwed Decimal @db.Decimal(12, 2)   // final computed INR amount owed
+
+  expense    Expense @relation(fields: [expenseId], references: [id])
+  user       User    @relation(fields: [userId], references: [id])
+}
+
+model Settlement {
+  id        Int      @id @default(autoincrement())
+  groupId   Int
+  payerId   Int
+  payeeId   Int
+  amount    Decimal  @db.Decimal(12, 2)
+  currency  String   @default("INR")
+  date      DateTime
+  notes     String?
+  importRunId Int?
+
+  group     Group    @relation(fields: [groupId], references: [id])
+  payer     User     @relation("Payer", fields: [payerId], references: [id])
+  payee     User     @relation("Payee", fields: [payeeId], references: [id])
+  importRun ImportRun? @relation(fields: [importRunId], references: [id])
+}
+
+model ImportRun {
+  id          Int      @id @default(autoincrement())
+  filename    String
+  importedAt  DateTime @default(now())
+  status      ImportStatus @default(PENDING)
+  totalRows   Int      @default(0)
+  importedRows Int     @default(0)
+  skippedRows Int      @default(0)
+
+  anomalies   ImportAnomaly[]
+  expenses    Expense[]
+  settlements Settlement[]
+}
+
+enum ImportStatus {
+  PENDING
+  REVIEW       // anomalies surfaced, awaiting user decisions
+  COMPLETE
+  FAILED
+}
+
+model ImportAnomaly {
+  id          Int      @id @default(autoincrement())
+  importRunId Int
+  rowNumber   Int
+  rowRaw      String   // original CSV row as JSON string
+  anomalyType String   // e.g. DUPLICATE, MISSING_PAYER, CURRENCY_MISSING, etc.
+  description String
+  severity    AnomalySeverity
+  resolution  AnomalyResolution @default(PENDING)
+  resolvedData String?  // JSON: user's chosen corrected values
+
+  importRun   ImportRun @relation(fields: [importRunId], references: [id])
+}
+
+enum AnomalySeverity {
+  ERROR    // cannot import without user decision
+  WARNING  // imported with assumption, user can override
+  INFO     // informational only
+}
+
+enum AnomalyResolution {
+  PENDING
+  ACCEPTED      // import as-is or with app's default fix
+  MODIFIED      // user provided corrected data
+  SKIPPED       // user decided to skip this row
+}

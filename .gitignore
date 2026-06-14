@@ -42,7 +42,6 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Prisma
-/backend/prisma/migrations/
 /backend/prisma/*.db
 /backend/prisma/*.sqlite
 /backend/prisma/*.db-journal
